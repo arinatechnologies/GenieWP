@@ -16,6 +16,9 @@ if (!defined('ABSPATH')) {
 
 // Define constants
 define('GENIEWP_VERSION', '1.0.0');
+define('QUICKWP_APP_BASEFILE', __FILE__);
+define('QUICKWP_APP_URL', plugin_dir_url(__FILE__));
+define('QUICKWP_APP_PATH', __DIR__);
 define('GENIEWP_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('GENIEWP_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -83,7 +86,8 @@ function geniewp_load_plugin() {
     // Load core classes with file existence checks
     $core_files = [
         'inc/class-main.php',
-        'inc/class-api.php'
+        'inc/class-api.php',
+        'inc/helpers.php'
     ];
 
     foreach ($core_files as $file) {
@@ -116,6 +120,9 @@ register_activation_hook(__FILE__, function () {
             wp_die(implode('<br>', $errors));
         }
 
+        // Add default option for API key
+        add_option('open_ai_api_key', '');
+        
         // Flush rewrite rules
         flush_rewrite_rules();
     } catch (Exception $e) {

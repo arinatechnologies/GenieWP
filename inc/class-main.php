@@ -96,6 +96,8 @@ class Main {
 	 * @return void
 	 */
 	private function register_hooks() {
+		add_action( 'admin_menu', array( $this, 'add_admin_menu' ) );
+		add_action( 'admin_init', array( $this, 'settings_init' ) );
 		add_action( 'enqueue_block_editor_assets', array( $this, 'enqueue_assets' ) );
 
 		if ( defined( 'QUICKWP_APP_GUIDED_MODE' ) && QUICKWP_APP_GUIDED_MODE ) {
@@ -105,6 +107,123 @@ class Main {
 		}
 
 		add_action( 'wp_print_footer_scripts', array( $this, 'print_footer_scripts' ) );
+	}
+
+	/**
+	 * Add admin menu items.
+	 * 
+	 * @return void
+	 */
+	public function add_admin_menu() {
+		add_menu_page(
+			'GenieWP',
+			'GenieWP',
+			'manage_options',
+			'geniewp',
+			array( $this, 'admin_page_html' ),
+			'dashicons-admin-generic',
+			30
+		);
+		
+		add_submenu_page(
+			'geniewp',
+			'Settings',
+			'Settings',
+			'manage_options',
+			'geniewp-settings',
+			array( $this, 'settings_page_html' )
+		);
+	}
+
+	/**
+	 * Initialize settings.
+	 * 
+	 * @return void
+	 */
+	public function settings_init() {
+		register_setting( 'geniewp_settings', 'open_ai_api_key' );
+		
+		add_settings_section(
+			'geniewp_settings_section',
+			'API Settings',
+			null,
+			'geniewp_settings'
+		);
+		
+		add_settings_field(
+			'open_ai_api_key',
+			'OpenAI API Key',
+			array( $this, 'api_key_render' ),
+			'geniewp_settings',
+			'geniewp_settings_section'
+		);
+	}
+
+	/**
+	 * Render API key field.
+	 * 
+	 * @return void
+	 */
+	public function api_key_render() {
+		$api_key = get_option( 'open_ai_api_key' );
+		?>
+		<input type='password' name='open_ai_api_key' value='<?php echo esc_attr( $api_key ); ?>' class='regular-text'>
+		<p class="description">Enter your OpenAI API key to enable AI-powered theme generation.</p>
+		<?php
+	}
+
+	/**
+	 * Main admin page HTML.
+	 * 
+	 * @return void
+	 */
+	public function admin_page_html() {
+		?>
+		<div class="wrap">
+			<h1>GenieWP - AI Theme Generator</h1>
+			<p>Generate full WordPress block themes from AI prompts.</p>
+			
+			<?php if ( ! get_option( 'open_ai_api_key' ) ) : ?>
+				<div class="notice notice-warning">
+					<p><?php _e( 'Please add your OpenAI API key in the Settings to enable AI generation. You can still generate a minimal theme without AI.', 'quickwp' ); ?></p>
+				</div>
+			<?php endif; ?>
+			
+			<div id="quickwp-app">
+				<!-- This is where the React app will be mounted -->
+			</div>
+		</div>
+		<?php
+	}
+
+	/**
+	 * Settings page HTML.
+	 * 
+	 * @return void
+	 */
+	public function settings_page_html() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			return;
+		}
+		
+		if ( isset( $_GET['settings-updated'] ) ) {
+			add_settings_error( 'geniewp_messages', 'geniewp_updated', 'Settings Saved', 'updated' );
+		}
+		
+		settings_errors( 'geniewp_messages' );
+		
+		?>
+		<div class="wrap">
+			<h1><?php echo esc_html( get_admin_page_title() ); ?></h1>
+			<form action="options.php" method="post">
+				<?php
+				settings_fields( 'geniewp_settings' );
+				do_settings_sections( 'geniewp_settings' );
+				submit_button( 'Save Settings' );
+				?>
+			</form>
+		</div>
+		<?php
 	}
 
 	/**
