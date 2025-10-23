@@ -88,6 +88,7 @@ function geniewp_load_plugin() {
         'inc/class-main.php',
         'inc/class-api.php',
         'inc/class-theme-generator.php',
+        'inc/class-theme-setup.php',
         'inc/helpers.php'
     ];
 
@@ -103,6 +104,10 @@ function geniewp_load_plugin() {
         // Check if the class exists (in case file loading failed)
         if (class_exists('\\ThemeIsle\\QuickWP\\Main')) {
             new \ThemeIsle\QuickWP\Main();
+        }
+        // Initialize theme setup handler
+        if (class_exists('\\ThemeIsle\\QuickWP\\Theme_Setup')) {
+            new \ThemeIsle\QuickWP\Theme_Setup();
         }
     });
 }
