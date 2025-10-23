@@ -35,6 +35,9 @@ class Main {
 		
 		// Add admin notice if needed
 		add_action('admin_init', [$this, 'check_requirements']);
+		
+		// Register AJAX handlers
+		add_action( 'wp_ajax_geniewp_generate_theme', array( $this, 'ajax_generate_theme' ) );
 	}
 	
 	/**
@@ -178,20 +181,191 @@ class Main {
 	 * @return void
 	 */
 	public function admin_page_html() {
+		$api_key = get_option( 'open_ai_api_key' );
 		?>
 		<div class="wrap">
 			<h1>GenieWP - AI Theme Generator</h1>
 			<p>Generate full WordPress block themes from AI prompts.</p>
 			
-			<?php if ( ! get_option( 'open_ai_api_key' ) ) : ?>
+			<?php if ( empty( $api_key ) ) : ?>
 				<div class="notice notice-warning">
-					<p><?php _e( 'Please add your OpenAI API key in the Settings to enable AI generation. You can still generate a minimal theme without AI.', 'quickwp' ); ?></p>
+					<p>
+						<?php 
+						printf(
+							__( 'OpenAI API key not configured. You can still generate a minimal theme, or <a href="%s">add your API key</a> to enable AI-powered generation.', 'geniewp' ),
+							admin_url( 'admin.php?page=geniewp-settings' )
+						);
+						?>
+					</p>
 				</div>
 			<?php endif; ?>
 			
-			<div id="quickwp-app">
-				<!-- This is where the React app will be mounted -->
+			<div id="geniewp-generator" style="max-width: 800px;">
+				<div class="card" style="margin-top: 20px;">
+					<h2 style="margin-top: 0;">Generate Your Theme</h2>
+					
+					<form id="geniewp-form" method="post" action="">
+						<?php wp_nonce_field( 'geniewp_generate_theme', 'geniewp_nonce' ); ?>
+						
+						<table class="form-table" role="presentation">
+							<tbody>
+								<tr>
+									<th scope="row">
+										<label for="site_name"><?php _e( 'Website Name / Brand', 'geniewp' ); ?> <span style="color: red;">*</span></label>
+									</th>
+									<td>
+										<input type="text" id="site_name" name="site_name" class="regular-text" required 
+											placeholder="e.g., My Awesome Site" />
+										<p class="description"><?php _e( 'The name of your website or brand.', 'geniewp' ); ?></p>
+									</td>
+								</tr>
+								
+								<tr>
+									<th scope="row">
+										<label for="business_type"><?php _e( 'Business Type / Industry', 'geniewp' ); ?> <span style="color: red;">*</span></label>
+									</th>
+									<td>
+										<input type="text" id="business_type" name="business_type" class="regular-text" required 
+											placeholder="e.g., Photography, Restaurant, Tech Startup" />
+										<p class="description"><?php _e( 'What type of business or website is this?', 'geniewp' ); ?></p>
+									</td>
+								</tr>
+								
+								<tr>
+									<th scope="row">
+										<label for="tagline"><?php _e( 'Tagline (Optional)', 'geniewp' ); ?></label>
+									</th>
+									<td>
+										<input type="text" id="tagline" name="tagline" class="regular-text" 
+											placeholder="e.g., Creating beautiful moments" />
+										<p class="description"><?php _e( 'A short tagline or slogan.', 'geniewp' ); ?></p>
+									</td>
+								</tr>
+								
+								<tr>
+									<th scope="row">
+										<label for="description"><?php _e( 'Description (Optional)', 'geniewp' ); ?></label>
+									</th>
+									<td>
+										<textarea id="description" name="description" rows="4" class="large-text" 
+											placeholder="<?php _e( 'Tell us more about your website...', 'geniewp' ); ?>"></textarea>
+										<p class="description"><?php _e( 'Provide more details about your website purpose and content.', 'geniewp' ); ?></p>
+									</td>
+								</tr>
+								
+								<tr>
+									<th scope="row">
+										<label for="primary_color"><?php _e( 'Primary Color', 'geniewp' ); ?></label>
+									</th>
+									<td>
+										<input type="color" id="primary_color" name="primary_color" value="#2563eb" />
+										<span id="primary_color_value" style="margin-left: 10px; font-family: monospace;">#2563eb</span>
+										<p class="description"><?php _e( 'Choose your primary brand color.', 'geniewp' ); ?></p>
+									</td>
+								</tr>
+								
+								<tr>
+									<th scope="row">
+										<label for="secondary_color"><?php _e( 'Secondary Color', 'geniewp' ); ?></label>
+									</th>
+									<td>
+										<input type="color" id="secondary_color" name="secondary_color" value="#10b981" />
+										<span id="secondary_color_value" style="margin-left: 10px; font-family: monospace;">#10b981</span>
+										<p class="description"><?php _e( 'Choose your secondary color.', 'geniewp' ); ?></p>
+									</td>
+								</tr>
+							</tbody>
+						</table>
+						
+						<p class="submit">
+							<button type="submit" id="geniewp-submit-btn" class="button button-primary button-large">
+								<span class="dashicons dashicons-admin-appearance" style="margin-top: 4px;"></span>
+								<?php _e( 'Generate Theme', 'geniewp' ); ?>
+							</button>
+							<span id="geniewp-loading" style="display: none; margin-left: 15px;">
+								<span class="spinner is-active" style="float: none; margin: 0;"></span>
+								<span style="margin-left: 10px;"><?php _e( 'Generating your theme...', 'geniewp' ); ?></span>
+							</span>
+						</p>
+					</form>
+					
+					<div id="geniewp-message" style="margin-top: 20px;"></div>
+				</div>
 			</div>
+			
+			<script type="text/javascript">
+			jQuery(document).ready(function($) {
+				// Update color value displays
+				$('#primary_color').on('input', function() {
+					$('#primary_color_value').text($(this).val());
+				});
+				$('#secondary_color').on('input', function() {
+					$('#secondary_color_value').text($(this).val());
+				});
+				
+				// Handle form submission
+				$('#geniewp-form').on('submit', function(e) {
+					e.preventDefault();
+					
+					var $form = $(this);
+					var $submitBtn = $('#geniewp-submit-btn');
+					var $loading = $('#geniewp-loading');
+					var $message = $('#geniewp-message');
+					
+					// Disable submit button and show loading
+					$submitBtn.prop('disabled', true);
+					$loading.show();
+					$message.html('');
+					
+					// Prepare form data
+					var formData = {
+						action: 'geniewp_generate_theme',
+						nonce: $('input[name="geniewp_nonce"]').val(),
+						site_name: $('#site_name').val(),
+						business_type: $('#business_type').val(),
+						tagline: $('#tagline').val(),
+						description: $('#description').val(),
+						primary_color: $('#primary_color').val(),
+						secondary_color: $('#secondary_color').val()
+					};
+					
+					// Send AJAX request
+					$.post(ajaxurl, formData, function(response) {
+						$submitBtn.prop('disabled', false);
+						$loading.hide();
+						
+						if (response.success) {
+							$message.html(
+								'<div class="notice notice-success is-dismissible"><p>' +
+								'<strong>✅ Theme Generated Successfully!</strong><br>' +
+								'Theme Name: <strong>' + response.data.theme_name + '</strong><br>' +
+								'Theme Slug: <code>' + response.data.theme_slug + '</code><br><br>' +
+								'<a href="' + response.data.activate_url + '" class="button button-primary">Activate Theme</a> ' +
+								'<a href="' + response.data.customize_url + '" class="button">Customize</a>' +
+								'</p></div>'
+							);
+							$form[0].reset();
+							$('#primary_color_value').text('#2563eb');
+							$('#secondary_color_value').text('#10b981');
+						} else {
+							$message.html(
+								'<div class="notice notice-error is-dismissible"><p>' +
+								'<strong>❌ Error:</strong> ' + response.data.message +
+								'</p></div>'
+							);
+						}
+					}).fail(function() {
+						$submitBtn.prop('disabled', false);
+						$loading.hide();
+						$message.html(
+							'<div class="notice notice-error is-dismissible"><p>' +
+							'<strong>❌ Error:</strong> An unexpected error occurred. Please try again.' +
+							'</p></div>'
+						);
+					});
+				});
+			});
+			</script>
 		</div>
 		<?php
 	}
