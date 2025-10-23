@@ -87,6 +87,7 @@ function geniewp_load_plugin() {
     $core_files = [
         'inc/class-main.php',
         'inc/class-api.php',
+        'inc/class-theme-generator.php',
         'inc/helpers.php'
     ];
 

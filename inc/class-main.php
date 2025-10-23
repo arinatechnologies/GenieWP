@@ -556,4 +556,63 @@ class Main {
 			exit;
 		}
 	}
+/**
+ * AJAX handler for theme generation
+ *
+ * @return void
+ */
+public function ajax_generate_theme() {
+// Verify nonce
+if ( ! isset( $_POST['nonce'] ) || ! wp_verify_nonce( $_POST['nonce'], 'geniewp_generate_theme' ) ) {
+wp_send_json_error( array(
+'message' => __( 'Security check failed. Please refresh the page and try again.', 'geniewp' ),
+) );
+}
+
+// Check user permissions
+if ( ! current_user_can( 'manage_options' ) ) {
+wp_send_json_error( array(
+'message' => __( 'You do not have permission to generate themes.', 'geniewp' ),
+) );
+}
+
+// Get form data
+$form_data = array(
+'site_name'       => sanitize_text_field( $_POST['site_name'] ?? '' ),
+'business_type'   => sanitize_text_field( $_POST['business_type'] ?? '' ),
+'tagline'         => sanitize_text_field( $_POST['tagline'] ?? '' ),
+'description'     => sanitize_textarea_field( $_POST['description'] ?? '' ),
+'primary_color'   => sanitize_hex_color( $_POST['primary_color'] ?? '#2563eb' ),
+'secondary_color' => sanitize_hex_color( $_POST['secondary_color'] ?? '#10b981' ),
+);
+
+// Validate required fields
+if ( empty( $form_data['site_name'] ) || empty( $form_data['business_type'] ) ) {
+wp_send_json_error( array(
+'message' => __( 'Please fill in all required fields (Site Name and Business Type).', 'geniewp' ),
+) );
+}
+
+// Generate theme
+$generator = new Theme_Generator();
+$result = $generator->generate_theme( $form_data );
+
+if ( is_wp_error( $result ) ) {
+wp_send_json_error( array(
+'message' => $result->get_error_message(),
+) );
+}
+
+// Send success response
+wp_send_json_success( array(
+'message'    => sprintf(
+__( 'Theme "%s" created successfully!', 'geniewp' ),
+$result['theme_name']
+),
+'theme_slug' => $result['theme_slug'],
+'theme_name' => $result['theme_name'],
+'activate_url'  => admin_url( 'themes.php' ),
+			'customize_url' => admin_url( 'customize.php?theme=' . $result['theme_slug'] ),
+) );
+}
 }
