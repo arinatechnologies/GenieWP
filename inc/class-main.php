@@ -24,9 +24,70 @@ class Main {
 	 * Constructor.
 	 */
 	public function __construct() {
+		// Check if plugin is ready
+		if (!$this->is_ready()) {
+			return;
+		}
+		
 		$this->register_hooks();
 
 		$this->api = new API();
+		
+		// Add admin notice if needed
+		add_action('admin_init', [$this, 'check_requirements']);
+	}
+	
+	/**
+	 * Check if all requirements are met
+	 *
+	 * @return bool
+	 */
+	private function is_ready() {
+		// Check required extensions
+		$extensions = ['curl', 'json', 'mbstring'];
+		foreach ($extensions as $ext) {
+			if (!extension_loaded($ext)) {
+				return false;
+			}
+		}
+		
+		// Check PHP version
+		if (version_compare(PHP_VERSION, '8.1', '<')) {
+			return false;
+		}
+		
+		// Check WordPress version
+		if (version_compare($GLOBALS['wp_version'], '6.5', '<')) {
+			return false;
+		}
+		
+		return true;
+	}
+	
+	/**
+	 * Check requirements and show admin notices
+	 *
+	 * @return void
+	 */
+	public function check_requirements() {
+		if (!$this->is_ready()) {
+			add_action('admin_notices', [$this, 'requirements_notice']);
+		}
+	}
+	
+	/**
+	 * Display requirements notice
+	 *
+	 * @return void
+	 */
+	public function requirements_notice() {
+		if (!current_user_can('manage_options')) {
+			return;
+		}
+		
+		echo '<div class="notice notice-error">';
+		echo '<p>' . esc_html__('GenieWP requires PHP 8.1 or higher, WordPress 6.5 or higher, and the curl, json, and mbstring PHP extensions.', 'quickwp') . '</p>';
+		echo '</div>';
 	}
 
 	/**
@@ -62,7 +123,13 @@ class Main {
 			return;
 		}
 
-		$asset_file = include QUICKWP_APP_PATH . '/build/backend/index.asset.php';
+		// Check if asset file exists
+		$asset_file_path = QUICKWP_APP_PATH . '/build/backend/index.asset.php';
+		if (!file_exists($asset_file_path)) {
+			return;
+		}
+		
+		$asset_file = include $asset_file_path;
 
 		wp_enqueue_style(
 			'quickwp',
@@ -99,7 +166,13 @@ class Main {
 	 * @return void
 	 */
 	public function enqueue_frontend_assets() {
-		$asset_file = include QUICKWP_APP_PATH . '/build/frontend/frontend.asset.php';
+		// Check if asset file exists
+		$asset_file_path = QUICKWP_APP_PATH . '/build/frontend/frontend.asset.php';
+		if (!file_exists($asset_file_path)) {
+			return;
+		}
+		
+		$asset_file = include $asset_file_path;
 
 		wp_enqueue_style(
 			'quickwp-frontend',

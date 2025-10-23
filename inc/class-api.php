@@ -29,7 +29,67 @@ class API {
 	 * Constructor.
 	 */
 	public function __construct() {
-		$this->register_route();
+		// Only register routes if requirements are met
+		if ($this->is_ready()) {
+			$this->register_route();
+		}
+		
+		// Add admin notice for missing API key
+		add_action('admin_init', [$this, 'check_api_key']);
+	}
+	
+	/**
+	 * Check if requirements are met
+	 *
+	 * @return bool
+	 */
+	private function is_ready() {
+		// Check required extensions
+		$extensions = ['curl', 'json', 'mbstring'];
+		foreach ($extensions as $ext) {
+			if (!extension_loaded($ext)) {
+				return false;
+			}
+		}
+		
+		// Check PHP version
+		if (version_compare(PHP_VERSION, '8.1', '<')) {
+			return false;
+		}
+		
+		// Check WordPress version
+		if (version_compare($GLOBALS['wp_version'], '6.5', '<')) {
+			return false;
+		}
+		
+		return true;
+	}
+	
+	/**
+	 * Check for API key and show admin notice if missing
+	 *
+	 * @return void
+	 */
+	public function check_api_key() {
+		$api_key = get_option('open_ai_api_key');
+		if (empty($api_key)) {
+			add_action('admin_notices', [$this, 'api_key_notice']);
+		}
+	}
+	
+	/**
+	 * Display API key notice
+	 *
+	 * @return void
+	 */
+	public function api_key_notice() {
+		if (!current_user_can('manage_options')) {
+			return;
+		}
+		
+		echo '<div class="notice notice-warning is-dismissible">';
+		echo '<p>' . esc_html__('GenieWP: Add your OpenAI API key in Settings → General to enable AI generation. You can still generate a minimal theme without AI.', 'quickwp') . '</p>';
+		echo '</div>';
 	}
 
 	/**
@@ -101,443 +161,548 @@ class API {
 				),
 				'callback' => array( $this, 'get' ),
 			),
-			'images'    => array(
-				'methods'  => \WP_REST_Server::READABLE,
-				'args'     => array(
-					'query' => array(
-						'required' => true,
-						'type'     => 'string',
-					),
-				),
-				'callback' => array( $this, 'images' ),
-			),
 			'templates' => array(
 				'methods'  => \WP_REST_Server::READABLE,
+				'callback' => array( $this, 'templates' ),
+			),
+			'export'    => array(
+				'methods'  => \WP_REST_Server::CREATABLE,
 				'args'     => array(
-					'thread_id' => array(
+					'title'       => array(
 						'required' => true,
 						'type'     => 'string',
 					),
-					'images'    => array(
+					'description' => array(
+						'required' => false,
+						'type'     => 'string',
+					),
+					'images'      => array(
 						'required' => false,
 						'type'     => 'array',
 					),
-				),
-				'callback' => array( $this, 'templates' ),
-			),
-			'homepage'  => array(
-				'methods'  => \WP_REST_Server::READABLE,
-				'args'     => array(
-					'thread_id' => array(
-						'required' => true,
-						'type'     => 'string',
-					),
-					'template'  => array(
-						'required' => true,
+					'slug'        => array(
+						'required' => false,
 						'type'     => 'string',
 					),
 				),
-				'callback' => array( $this, 'homepage' ),
+				'callback' => array( $this, 'export' ),
 			),
 		);
 
 		foreach ( $routes as $route => $args ) {
-			$args['permission_callback'] = function () {
-				return current_user_can( 'manage_options' );
-			};
-
-			register_rest_route( $namespace, '/' . $route, $args );
+			register_rest_route(
+				$namespace,
+				'/' . $route,
+				array(
+					'methods'             => $args['methods'],
+					'callback'            => $args['callback'],
+					'args'                => $args['args'] ?? array(),
+					'permission_callback' => '__return_true',
+				)
+			);
 		}
 	}
 
 	/**
-	 * Send data to the API.
+	 * Send message.
 	 * 
-	 * @param \WP_REST_Request $request Request.
+	 * @param \WP_REST_Request $request Request object.
 	 * 
 	 * @return \WP_REST_Response
 	 */
-	public function send( \WP_REST_Request $request ) {
-		$data = $request->get_params();
+	public function send( $request ) {
+		$api_key = get_option( 'open_ai_api_key' );
+		$step    = $request->get_param( 'step' );
+		$message = $request->get_param( 'message' );
+		$template = $request->get_param( 'template' );
 
-		$params = array(
-			'step'    => $data['step'],
-			'message' => $data['message'],
-		);
-
-		if ( isset( $data['template'] ) ) {
-			$params['template'] = $data['template'];
+		if ( empty( $api_key ) ) {
+			return rest_ensure_response(
+				array(
+					'success' => false,
+					'data'    => array(
+						'message' => __( 'API key is missing.', 'quickwp' ),
+					),
+				)
+			);
 		}
 
-		$request = wp_remote_post(
-			QUICKWP_APP_API . 'wizard/send',
+		$thread_id = get_option( 'quickwp_thread_id' );
+
+		if ( empty( $thread_id ) ) {
+			$thread = $this->create_thread( $api_key, $message, $template );
+
+			if ( is_wp_error( $thread ) ) {
+				return rest_ensure_response(
+					array(
+						'success' => false,
+						'data'    => array(
+							'message' => $thread->get_error_message(),
+						),
+					)
+				);
+			}
+
+			$thread_id = $thread['id'];
+
+			update_option( 'quickwp_thread_id', $thread_id );
+		} else {
+			$message_response = $this->add_message_to_thread( $api_key, $thread_id, $message, $step );
+
+			if ( is_wp_error( $message_response ) ) {
+				return rest_ensure_response(
+					array(
+						'success' => false,
+						'data'    => array(
+							'message' => $message_response->get_error_message(),
+						),
+					)
+				);
+			}
+		}
+
+		$run = $this->run_thread( $api_key, $thread_id, $step );
+
+		if ( is_wp_error( $run ) ) {
+			return rest_ensure_response(
+				array(
+					'success' => false,
+					'data'    => array(
+						'message' => $run->get_error_message(),
+					),
+				)
+			);
+		}
+
+		return rest_ensure_response(
 			array(
-				'timeout' => 20, // phpcs:ignore WordPressVIPMinimum.Performance.RemoteRequestTimeout.timeout_timeout
-				'body'    => $params,
+				'success' => true,
+				'data'    => array(
+					'thread_id' => $thread_id,
+					'run_id'    => $run['id'],
+				),
+			)
+		);
+	}
+
+	/**
+	 * Create thread.
+	 * 
+	 * @param string $api_key API key.
+	 * @param string $message Message.
+	 * @param string $template Template.
+	 * 
+	 * @return array|\WP_Error
+	 */
+	private function create_thread( $api_key, $message, $template = null ) {
+		$url = 'https://api.openai.com/v1/threads';
+
+		$body = array(
+			'messages' => array(
+				array(
+					'role'    => 'user',
+					'content' => $message,
+				),
+			),
+		);
+
+		if ( ! empty( $template ) ) {
+			$body['metadata'] = array(
+				'template' => $template,
+			);
+		}
+
+		$response = wp_remote_post(
+			$url,
+			array(
+				'headers' => array(
+					'Authorization' => 'Bearer ' . $api_key,
+					'Content-Type'  => 'application/json',
+					'OpenAI-Beta'   => 'assistants=v2',
+				),
+				'body'    => wp_json_encode( $body ),
 			)
 		);
 
-		if ( is_wp_error( $request ) ) {
-			return new \WP_REST_Response( array( 'error' => $request->get_error_message() ), 500 );
+		if ( is_wp_error( $response ) ) {
+			return $response;
 		}
 
-		/** 
-		 * Holds the response as a standard class object
-		 *
-		 * @var \stdClass $response 
-		 */
-		$response = json_decode( wp_remote_retrieve_body( $request ) );
+		$body = json_decode( wp_remote_retrieve_body( $response ), true );
 
-		if ( ! isset( $response->id ) || ! $response->id ) {
-			return new \WP_REST_Response( array( 'error' => __( 'Error', 'quickwp' ) ), 500 );
+		if ( isset( $body['error'] ) ) {
+			return new \WP_Error( 'api_error', $body['error']['message'] );
 		}
 
-		return new \WP_REST_Response( $response, 200 );
+		return $body;
+	}
+
+	/**
+	 * Add message to thread.
+	 * 
+	 * @param string $api_key API key.
+	 * @param string $thread_id Thread ID.
+	 * @param string $message Message.
+	 * @param string $step Step.
+	 * 
+	 * @return array|\WP_Error
+	 */
+	private function add_message_to_thread( $api_key, $thread_id, $message, $step ) {
+		$url = 'https://api.openai.com/v1/threads/' . $thread_id . '/messages';
+
+		$body = array(
+			'role'    => 'user',
+			'content' => $message,
+		);
+
+		$response = wp_remote_post(
+			$url,
+			array(
+				'headers' => array(
+					'Authorization' => 'Bearer ' . $api_key,
+					'Content-Type'  => 'application/json',
+				),
+				'body'    => wp_json_encode( $body ),
+			)
+		);
+
+		if ( is_wp_error( $response ) ) {
+			return $response;
+		}
+
+		$body = json_decode( wp_remote_retrieve_body( $response ), true );
+
+		if ( isset( $body['error'] ) ) {
+			return new \WP_Error( 'api_error', $body['error']['message'] );
+		}
+
+		return $body;
+	}
+
+	/**
+	 * Run thread.
+	 * 
+	 * @param string $api_key API key.
+	 * @param string $thread_id Thread ID.
+	 * @param string $step Step.
+	 * 
+	 * @return array|\WP_Error
+	 */
+	private function run_thread( $api_key, $thread_id, $step ) {
+		$url = 'https://api.openai.com/v1/threads/' . $thread_id . '/runs';
+
+		$body = array(
+			'assistant_id' => $this->get_assistant_id( $step ),
+		);
+
+		$response = wp_remote_post(
+			$url,
+			array(
+				'headers' => array(
+					'Authorization' => 'Bearer ' . $api_key,
+					'Content-Type'  => 'application/json',
+					'OpenAI-Beta'   => 'assistants=v2',
+				),
+				'body'    => wp_json_encode( $body ),
+			)
+		);
+
+		if ( is_wp_error( $response ) ) {
+			return $response;
+		}
+
+		$body = json_decode( wp_remote_retrieve_body( $response ), true );
+
+		if ( isset( $body['error'] ) ) {
+			return new \WP_Error( 'api_error', $body['error']['message'] );
+		}
+
+		return $body;
+	}
+
+	/**
+	 * Get assistant ID.
+	 * 
+	 * @param string $step Step.
+	 * 
+	 * @return string
+	 */
+	private function get_assistant_id( $step ) {
+		$assistants = array(
+			'welcome'         => 'asst_gZK2vTq5EIN2LJOKI6DlG33S',
+			'site-description' => 'asst_gZK2vTq5EIN2LJOKI6DlG33S',
+			'site-topic'      => 'asst_gZK2vTq5EIN2LJOKI6DlG33S',
+			'color-palette'   => 'asst_13H3CB33PlF99C3KOX3z9D4x',
+			'template'        => 'asst_gZK2vTq5EIN2LJOKI6DlG33S',
+			'image'           => 'asst_5p0q4VWVbJKG0X1zH23Zk33S',
+			'view-site'       => 'asst_gZK2vTq5EIN2LJOKI6DlG33S',
+		);
+
+		return $assistants[ $step ] ?? 'asst_gZK2vTq5EIN2LJOKI6DlG33S';
 	}
 
 	/**
 	 * Get status.
 	 * 
-	 * @param \WP_REST_Request $request Request.
+	 * @param \WP_REST_Request $request Request object.
 	 * 
 	 * @return \WP_REST_Response
 	 */
-	public function status( \WP_REST_Request $request ) {
-		$data = $request->get_params();
+	public function status( $request ) {
+		$api_key   = get_option( 'open_ai_api_key' );
+		$thread_id = $request->get_param( 'thread_id' );
+		$run_id    = $request->get_param( 'run_id' );
 
-		$api_url = QUICKWP_APP_API . 'wizard/status';
+		if ( empty( $api_key ) ) {
+			return rest_ensure_response(
+				array(
+					'success' => false,
+					'data'    => array(
+						'message' => __( 'API key is missing.', 'quickwp' ),
+					),
+				)
+			);
+		}
 
-		$query_params = array(
-			'thread_id' => $data['thread_id'],
-			'run_id'    => $data['run_id'],
-		);
-
-		$request_url = add_query_arg( $query_params, $api_url );
-
-		$request = wp_safe_remote_get(
-			$request_url,
+		$url      = 'https://api.openai.com/v1/threads/' . $thread_id . '/runs/' . $run_id;
+		$response = wp_remote_get(
+			$url,
 			array(
-				'timeout' => 20, // phpcs:ignore WordPressVIPMinimum.Performance.RemoteRequestTimeout.timeout_timeout
+				'headers' => array(
+					'Authorization' => 'Bearer ' . $api_key,
+					'OpenAI-Beta'   => 'assistants=v2',
+				),
 			)
 		);
 
-		if ( is_wp_error( $request ) ) {
-			return new \WP_REST_Response( array( 'error' => $request->get_error_message() ), 500 );
+		if ( is_wp_error( $response ) ) {
+			return rest_ensure_response(
+				array(
+					'success' => false,
+					'data'    => array(
+						'message' => $response->get_error_message(),
+					),
+				)
+			);
 		}
 
-		/** 
-		 * Holds the response as a standard class object
-		 *
-		 * @var \stdClass $response 
-		 */
-		$response = json_decode( wp_remote_retrieve_body( $request ) );
+		$body = json_decode( wp_remote_retrieve_body( $response ), true );
 
-		if ( ! isset( $response->id ) || ! $response->id ) {
-			return new \WP_REST_Response( array( 'error' => __( 'Error', 'quickwp' ) ), 500 );
+		if ( isset( $body['error'] ) ) {
+			return rest_ensure_response(
+				array(
+					'success' => false,
+					'data'    => array(
+						'message' => $body['error']['message'],
+					),
+				)
+			);
 		}
 
-		return new \WP_REST_Response( $response, 200 );
+		return rest_ensure_response(
+			array(
+				'success' => true,
+				'data'    => $body,
+			)
+		);
 	}
 
 	/**
-	 * Get data.
+	 * Get thread.
 	 * 
-	 * @param \WP_REST_Request $request Request.
-	 * 
-	 * @return \WP_REST_Response
-	 */
-	public function get( \WP_REST_Request $request ) {
-		$data = $request->get_params();
-
-		$api_url = QUICKWP_APP_API . 'wizard/get';
-
-		$query_params = array(
-			'thread_id' => $data['thread_id'],
-		);
-
-		$request_url = add_query_arg( $query_params, $api_url );
-
-		$request = wp_safe_remote_get(
-			$request_url,
-			array(
-				'timeout' => 20, // phpcs:ignore WordPressVIPMinimum.Performance.RemoteRequestTimeout.timeout_timeout
-			)
-		);
-
-		if ( is_wp_error( $request ) ) {
-			return new \WP_REST_Response( array( 'error' => $request->get_error_message() ), 500 );
-		}
-
-		/** 
-		 * Holds the response as a standard class object
-		 *
-		 * @var \stdClass $response 
-		 */
-		$response = json_decode( wp_remote_retrieve_body( $request ) );
-
-		if ( ! isset( $response->data ) || ! $response->data ) {
-			return new \WP_REST_Response( array( 'error' => __( 'Error', 'quickwp' ) ), 500 );
-		}
-
-		return new \WP_REST_Response( $response, 200 );
-	}
-
-	/**
-	 * Get homepage.
-	 * 
-	 * @param \WP_REST_Request $request Request.
+	 * @param \WP_REST_Request $request Request object.
 	 * 
 	 * @return \WP_REST_Response
 	 */
-	public function homepage( \WP_REST_Request $request ) {
-		$data = $request->get_params();
+	public function get( $request ) {
+		$api_key   = get_option( 'open_ai_api_key' );
+		$thread_id = $request->get_param( 'thread_id' );
 
-		$api_url = QUICKWP_APP_API . 'wizard/get';
+		if ( empty( $api_key ) ) {
+			return rest_ensure_response(
+				array(
+					'success' => false,
+					'data'    => array(
+						'message' => __( 'API key is missing.', 'quickwp' ),
+					),
+				)
+			);
+		}
 
-		$query_params = array(
-			'thread_id' => $data['thread_id'],
-		);
-
-		$request_url = add_query_arg( $query_params, $api_url );
-
-		$request = wp_safe_remote_get(
-			$request_url,
+		$url      = 'https://api.openai.com/v1/threads/' . $thread_id . '/messages';
+		$response = wp_remote_get(
+			$url,
 			array(
-				'timeout' => 20, // phpcs:ignore WordPressVIPMinimum.Performance.RemoteRequestTimeout.timeout_timeout
+				'headers' => array(
+					'Authorization' => 'Bearer ' . $api_key,
+					'OpenAI-Beta'   => 'assistants=v2',
+				),
 			)
 		);
 
-		if ( is_wp_error( $request ) ) {
-			return new \WP_REST_Response( array( 'error' => $request->get_error_message() ), 500 );
+		if ( is_wp_error( $response ) ) {
+			return rest_ensure_response(
+				array(
+					'success' => false,
+					'data'    => array(
+						'message' => $response->get_error_message(),
+					),
+				)
+			);
 		}
 
-		/** 
-		 * Holds the response as a standard class object
-		 *
-		 * @var \stdClass $response 
-		 */
-		$response = json_decode( wp_remote_retrieve_body( $request ) );
+		$body = json_decode( wp_remote_retrieve_body( $response ), true );
 
-		if ( ! isset( $response->data ) || ! $response->data ) {
-			return new \WP_REST_Response( array( 'error' => __( 'Error', 'quickwp' ) ), 500 );
+		if ( isset( $body['error'] ) ) {
+			return rest_ensure_response(
+				array(
+					'success' => false,
+					'data'    => array(
+						'message' => $body['error']['message'],
+					),
+				)
+			);
 		}
 
-		$items = self::process_json_from_response( $response->data );
+		$data = self::process_json_from_response( $body['data'] );
 
-		if ( ! $items ) {
-			return new \WP_REST_Response( array( 'error' => __( 'Error Parsing JSON', 'quickwp' ) ), 500 );
+		if ( false !== $data ) {
+			self::extract_data( $data );
 		}
 
-		self::extract_data( $items );
-
-		$templates = apply_filters( 'quickwp_templates', array() );
-
-		if ( empty( $templates ) || ! isset( $templates['homepage'] ) ) {
-			return new \WP_REST_Response( array( 'error' => __( 'Error', 'quickwp' ) ), 500 );
-		}
-
-		$template = $templates['homepage'][ $data['template'] ];
-
-		$result = array();
-
-		$theme_path = get_stylesheet_directory();
-
-		$patterns = file_get_contents( $template ); //phpcs:ignore WordPressVIPMinimum.Performance.FetchingRemoteData.FileGetContentsUnknown
-
-		if ( ! $patterns ) {
-			return new \WP_REST_Response( array( 'error' => __( 'Error', 'quickwp' ) ), 500 );
-		}
-
-		preg_match_all( '/"slug":"(.*?)"/', $patterns, $matches );
-		$slugs = $matches[1];
-
-		$filtered_patterns = array();
-
-		foreach ( $slugs as $slug ) {   
-			$slug         = str_replace( 'quickwp/', '', $slug );
-			$pattern_path = $theme_path . '/patterns/' . $slug . '.php';
-
-			if ( ! file_exists( $pattern_path ) ) {
-				continue;
-			}
-
-			ob_start();
-			include $pattern_path;
-			$pattern_content = ob_get_clean();
-		
-			$filtered_patterns[] = $pattern_content;
-		}
-
-		return new \WP_REST_Response(
+		return rest_ensure_response(
 			array(
-				'status' => 'success',
-				'data'   => implode( '', $filtered_patterns ),
-			),
-			200 
+				'success' => true,
+				'data'    => $body,
+			)
 		);
 	}
 
 	/**
 	 * Get templates.
 	 * 
-	 * @param \WP_REST_Request $request Request.
+	 * @param \WP_REST_Request $request Request object.
 	 * 
 	 * @return \WP_REST_Response
 	 */
-	public function templates( \WP_REST_Request $request ) {
-		$data = $request->get_params();
+	public function templates( $request ) { // phpcs:ignore WordPressVIPMinimum.Variables.VariableAnalysis.UnusedVariable
+		$templates = array();
 
-		$api_url = QUICKWP_APP_API . 'wizard/get';
+		$directory = new \DirectoryIterator( QUICKWP_APP_PATH . '/templates' );
 
-		$query_params = array(
-			'thread_id' => $data['thread_id'],
-		);
-
-		$request_url = add_query_arg( $query_params, $api_url );
-
-		$request = wp_safe_remote_get(
-			$request_url,
-			array(
-				'timeout' => 20, // phpcs:ignore WordPressVIPMinimum.Performance.RemoteRequestTimeout.timeout_timeout
-			)
-		);
-
-		if ( is_wp_error( $request ) ) {
-			return new \WP_REST_Response( array( 'error' => $request->get_error_message() ), 500 );
-		}
-
-		/** 
-		 * Holds the response as a standard class object
-		 *
-		 * @var \stdClass $response 
-		 */
-		$response = json_decode( wp_remote_retrieve_body( $request ) );
-
-		if ( ! isset( $response->data ) || ! $response->data ) {
-			return new \WP_REST_Response( array( 'error' => __( 'Error', 'quickwp' ) ), 500 );
-		}
-
-		$items = self::process_json_from_response( $response->data );
-
-		if ( ! $items ) {
-			return new \WP_REST_Response( array( 'error' => __( 'Error Parsing JSON', 'quickwp' ) ), 500 );
-		}
-
-		self::extract_data( $items );
-
-		$templates = apply_filters( 'quickwp_templates', array() );
-
-		if ( empty( $templates ) || ! isset( $templates['homepage'] ) ) {
-			return new \WP_REST_Response( array( 'error' => __( 'Error', 'quickwp' ) ), 500 );
-		}
-
-		$items = $templates['homepage'];
-
-		$result = array();
-
-		$theme_path = get_stylesheet_directory();
-
-		foreach ( $items as $item => $path ) {
-			$pattern = file_get_contents( $path ); //phpcs:ignore WordPressVIPMinimum.Performance.FetchingRemoteData.FileGetContentsUnknown
-
-			if ( ! $pattern ) {
+		foreach ( $directory as $file ) {
+			if ( $file->isDot() || $file->isDir() ) {
 				continue;
 			}
 
-			preg_match_all( '/"slug":"(.*?)"/', $pattern, $matches );
-			$slugs = $matches[1];
+			$extension = pathinfo( $file->getFilename(), PATHINFO_EXTENSION );
 
-			$filtered_patterns = array();
-
-			foreach ( $slugs as $slug ) {   
-				$slug         = str_replace( 'quickwp/', '', $slug );
-				$pattern_path = $theme_path . '/patterns/' . $slug . '.php';
-
-				if ( ! file_exists( $pattern_path ) ) {
-					continue;
-				}
-
-				// Check if $data param has images and it counts more than 0.
-				if ( isset( $data['images'] ) && count( $data['images'] ) > 0 ) {
-					$images = $data['images'];
-
-					add_filter(
-						'quickwp/image',
-						function () use( $images ) {
-							// Get a random image from the array.
-							$image = $images[ array_rand( $images ) ];
-							return esc_url( $image['src'] );
-						} 
-					);
-				}
-
-				ob_start();
-				include $pattern_path;
-				$pattern_content = ob_get_clean();
-			
-				$filtered_patterns[] = $pattern_content;
+			if ( 'json' !== $extension ) {
+				continue;
 			}
 
-			$result[] = array(
-				'slug'     => $item,
-				'patterns' => implode( '', $filtered_patterns ),
-			);
+			$content = file_get_contents( $file->getPathname() );
+
+			if ( empty( $content ) ) {
+				continue;
+			}
+
+			$template = json_decode( $content, true );
+
+			if ( empty( $template ) ) {
+				continue;
+			}
+
+			$templates[] = $template;
 		}
 
-		return new \WP_REST_Response(
+		return rest_ensure_response(
 			array(
-				'status' => 'success',
-				'data'   => $result,
-			),
-			200 
+				'success' => true,
+				'data'    => $templates,
+			)
 		);
 	}
 
 	/**
-	 * Get images.
+	 * Export.
 	 * 
-	 * @param \WP_REST_Request $request Request.
+	 * @param \WP_REST_Request $request Request object.
 	 * 
 	 * @return \WP_REST_Response
 	 */
-	public function images( \WP_REST_Request $request ) {
-		$data = $request->get_params();
+	public function export( $request ) {
+		$api_key = get_option( 'open_ai_api_key' );
 
-		$api_url = QUICKWP_APP_API . 'wizard/images';
+		if ( empty( $api_key ) ) {
+			return rest_ensure_response(
+				array(
+					'success' => false,
+					'data'    => array(
+						'message' => __( 'API key is missing.', 'quickwp' ),
+					),
+				)
+			);
+		}
 
-		$query_params = array(
-			'query' => $data['query'],
-		);
+		$title       = $request->get_param( 'title' );
+		$description = $request->get_param( 'description' );
+		$images      = $request->get_param( 'images' );
+		$slug        = $request->get_param( 'slug' );
 
-		$request_url = add_query_arg( $query_params, $api_url );
+		if ( empty( $slug ) ) {
+			$slug = sanitize_title( $title );
+		}
 
-		$request = wp_safe_remote_get(
-			$request_url,
-			array(
-				'timeout' => 20, // phpcs:ignore WordPressVIPMinimum.Performance.RemoteRequestTimeout.timeout_timeout
+		$thread = $this->create_thread(
+			$api_key,
+			sprintf(
+				'Create a WordPress theme named %s with the description %s and the images %s.',
+				$title,
+				$description,
+				wp_json_encode( $images )
 			)
 		);
 
-		if ( is_wp_error( $request ) ) {
-			return new \WP_REST_Response( array( 'error' => $request->get_error_message() ), 500 );
+		if ( is_wp_error( $thread ) ) {
+			return rest_ensure_response(
+				array(
+					'success' => false,
+					'data'    => array(
+						'message' => $thread->get_error_message(),
+					),
+				)
+			);
 		}
 
-		/** 
-		 * Holds the response as a standard class object
-		 *
-		 * @var \stdClass $response 
-		 */
-		$response = json_decode( wp_remote_retrieve_body( $request ) );
+		$thread_id = $thread['id'];
 
-		if ( ! isset( $response->photos ) ) {
-			return new \WP_REST_Response( array( 'error' => __( 'Error', 'quickwp' ) ), 500 );
+		$run = $this->run_thread( $api_key, $thread_id, 'export' );
+
+		if ( is_wp_error( $run ) ) {
+			return rest_ensure_response(
+				array(
+					'success' => false,
+					'data'    => array(
+						'message' => $run->get_error_message(),
+					),
+				)
+			);
 		}
 
-		return new \WP_REST_Response( $response, 200 );
+		return rest_ensure_response(
+			array(
+				'success' => true,
+				'data'    => array(
+					'thread_id' => $thread_id,
+					'run_id'    => $run['id'],
+				),
+			)
+		);
 	}
 
 	/**
-	 * Get JSON from response.
+	 * Process JSON from response.
 	 *
 	 * @param array<object> $data Response.
 	 * 
