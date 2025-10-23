@@ -26,12 +26,17 @@ class Main {
 	public function __construct() {
 		// Check if plugin is ready
 		if (!$this->is_ready()) {
+			// Still add admin notices even if not ready
+			add_action('admin_notices', [$this, 'requirements_notice']);
 			return;
 		}
 		
 		$this->register_hooks();
 
-		$this->api = new API();
+		// Only instantiate API if class exists
+		if ( class_exists( 'ThemeIsle\QuickWP\API' ) ) {
+			$this->api = new API();
+		}
 		
 		// Add admin notice if needed
 		add_action('admin_init', [$this, 'check_requirements']);
